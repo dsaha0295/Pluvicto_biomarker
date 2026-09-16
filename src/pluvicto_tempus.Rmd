@@ -1,0 +1,1936 @@
+---
+title: "Analysis of Tempus xT and xF data from Theranostic cohort for CRPC/Pluvicto"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+#Read in Libraries
+```{r}
+library(tidyverse)
+library(clevRvis)
+library(viridisLite)
+library(maftools)
+library(lubridate)
+library(survminer)
+library(ggsci)
+library(gt)
+library(ggconsort)
+
+```
+
+
+
+
+
+########################Demographic/Genomics plots######################################
+
+#Plots of cohort describing metastatic sites, subtypes of aPCa, number of treatments
+```{r}
+#Preprocessing data
+data <- read.csv(file = "/Users/debanjansaha/Desktop/pluvicto_plots_v2/Theranostics CRPC Tempus Dataframe.csv", nrows = 143, stringsAsFactors = F)#143 rows to ignore NA rows
+data$study_id %>% unique() %>% length()
+#View(data)
+
+jco_cols <- pal_jco("default")(10)
+
+#Date of treatments
+data %>% 
+    mutate(date_col = as.Date(tempus_date, format = "%m/%d/%y")) %>% summarise(
+    earliest_date = min(date_col, na.rm = TRUE),
+    latest_date   = max(date_col, na.rm = TRUE)
+  )
+
+#Number of each biopsy type
+data %>%
+    mutate(specimen_type = trimws(specimen))%>%
+  filter(specimen_type %in% c("Liquid Biopsy", "Tissue")) %>%
+  distinct(study_id, specimen_type) %>%
+  group_by(study_id) %>%
+  summarise(types = paste(sort(unique(specimen_type)), collapse = "+")) %>%
+  count(types)
+
+
+#Number who got pluvicto
+got_pluvicto <- data %>%
+  distinct(study_id, pluvicto_start) %>%
+  mutate(Pluvicto = ifelse(is.na(pluvicto_start), "Naive", "Treatment")) %>% filter(Pluvicto == "Treatment")
+```
+
+
+```{r}
+
+#library(ggconsort)
+
+consort <- tibble(id = 1:442) %>%
+  mutate(
+    screened      = c(rep(TRUE, 67), rep(FALSE, 375)),
+    got_pluvicto  = screened & c(rep(TRUE, 37), rep(FALSE, 30), rep(FALSE, 375)),
+    psa_analysis  = got_pluvicto & c(rep(TRUE, 33), rep(FALSE, 4)),
+    pre_post      = psa_analysis & (row_number() <= 4)
+  )
+
+study_cohorts <- consort %>%
+  cohort_start("Patients referred for Theranostics evaluation") %>%
+  cohort_define(
+    excluded     = .full %>% filter(!screened),
+    screened     = .full %>% filter(screened),
+    no_pluvicto  = screened %>% filter(!got_pluvicto),
+    pluvicto     = screened %>% filter(got_pluvicto),
+    psa_analysis = pluvicto %>% filter(psa_analysis),
+    pre_post     = psa_analysis %>% filter(pre_post)
+  ) %>%
+  cohort_label(
+    excluded    = "Excluded: Not HSPC/CRPC and no tissue/cell-free Tempus data",
+    screened    = "Screened: Genomic + Biopsy available",
+    no_pluvicto = "Did not receive P-RPT",
+    pluvicto    = "Received P-RPT with PSMA SPECT/CT imaging",
+    psa_analysis = "\\>1 PSA timepoint", 
+    pre_post    = "Pre/post biopsy pairs available"
+  )
+
+study_consort <- study_cohorts |>
+  consort_box_add(
+    "full", row = 1, col = 0,
+    label = cohort_count_adorn(study_cohorts, .full)
+  ) |>
+  consort_box_add(
+    "excluded", row = 2, col = "side",
+    label = cohort_count_adorn(study_cohorts, excluded)
+  ) |>
+  consort_box_add(
+    "screened", row = 3, col = 0,
+    label = cohort_count_adorn(study_cohorts, screened)
+  ) |>
+  consort_box_add(
+    "no_pluvicto", row = 4, col = -1,
+    label = cohort_count_adorn(study_cohorts, no_pluvicto)
+  ) |>
+  consort_box_add(
+    "pluvicto", row = 4, col = 1,
+    label = cohort_count_adorn(study_cohorts, pluvicto)
+  ) |>
+  consort_box_add(
+    "psa_analysis", row = 5, col = 1,
+    label = cohort_count_adorn(study_cohorts, psa_analysis)
+  ) |>
+  consort_box_add(
+    "pre_post", row = 6, col = 1,
+    label = cohort_count_adorn(study_cohorts, pre_post)
+  ) |>
+  consort_arrow_add(start = "full", end = "screened") |>
+  consort_arrow_add(start = "full", end = "excluded") |>
+  consort_arrow_add(start = "screened", end = c("no_pluvicto", "pluvicto")) |>
+  consort_arrow_add(start = "pluvicto", end = "psa_analysis") |>
+  consort_arrow_add(start = "psa_analysis", end = "pre_post") |>
+  consort_stage_add("Referral", row = c(1, 3)) |>
+  consort_stage_add("Treatment allocation", row = 4) |>
+  consort_stage_add("PSA follow-up", row = 5) |>
+  consort_stage_add("Paired biopsy subset", row = 6)
+
+
+pdf(file = "/Users/debanjansaha/Desktop/pluvicto_plots_v2/pluvicto_consort.pdf", width = 20)
+study_consort |>
+  ggplot() +
+  geom_consort(label_size = 20) +     # `size` controls text size in the boxes (geom_label under the hood)
+  theme_consort()
+dev.off()
+
+
+```
+
+
+```{r}
+#Met site plot
+p1 <- data %>%
+  separate_rows(met_sites, sep = "\\s*,\\s*") %>%
+  dplyr::filter(!is.na(met_sites), met_sites != "") %>%
+  distinct(study_id, met_sites) %>% ggplot(aes(y = met_sites)) + geom_bar(fill = jco_cols[1]) + theme_bw()  + ylab("Metastatic sites") 
+
+#Subtype plot
+p2 <- data  %>% distinct(study_id, diagnosis) %>% ggplot(aes(x = diagnosis, fill = 2)) + geom_bar(width = 0.5, fill = jco_cols[2]) + theme_bw() + xlab("Histologic subtype")
+
+
+# Pluvicto therapy
+p3 <- data %>%
+  distinct(study_id, pluvicto_start) %>%
+  mutate(Pluvicto = ifelse(is.na(pluvicto_start), "Naive", "Treatment")) %>%
+  ggplot(aes(x = Pluvicto, fill = 3)) +
+  geom_bar(width = 0.3, fill = jco_cols[3]) +
+  geom_text(
+    stat = "count",
+    aes(label = after_stat(count)),
+    vjust = -0.5,      # positions the number just above the bar
+    size = 4
+  ) +
+  theme_bw()  +
+  xlab("Counts of patients receiving P-RPT")
+#Gleason score
+p4 <- data  %>%
+  dplyr::filter(!is.na(gleason_score), gleason_score != "") %>%
+  distinct(study_id, gleason_score) %>% ggplot(aes(y = gleason_score)) + geom_bar(fill = jco_cols[4]) + theme_bw()  + ylab("Gleason Score")
+
+p5 <-data %>%
+  dplyr::filter(!is.na(tumor_purity)) %>%
+  mutate(
+    tumor_purity = case_when(
+      str_detect(tumor_purity, "<25") ~ 0,
+      TRUE ~ as.numeric(tumor_purity)
+    )
+  ) %>%
+  ggplot(aes(x = tumor_purity)) +
+  geom_histogram(bins = 20, fill = jco_cols[5]) +
+  theme_bw() +
+  xlab("Tumor purity (%)") +
+  ylab("Count")
+
+p6 <- data %>%
+  mutate(
+    No.Lines.treatment =
+      str_count(
+        tx_context,
+        "\\s*-\\s*"
+      ) + 1
+  ) %>%
+  distinct(study_id, No.Lines.treatment) %>%
+  ggplot(aes(x = No.Lines.treatment)) +
+  geom_bar(fill = jco_cols[6]) +
+  theme_bw() +
+  xlab("Number of lines of treatment") +
+  ylab("Count")
+
+# pdf(file = "/Users/debanjansaha/Desktop/pluvicto_plots_v2/pluvicto_cohort.pdf", width = 10)
+# ggarrange(p1, p2, p3, p4,p5, p6, ncol = 3, nrow = 2, legend = F)
+# dev.off()
+
+```
+
+```{r}
+#patient-level table (one row per study_id) 
+pt_data <- data %>%
+  distinct(study_id, diagnosis, met_sites, gleason_score, tx_context)
+
+#met sites (multi-category, comma delimited
+met_counts <- pt_data %>%
+  separate_rows(met_sites, sep = ",\\s*") %>%
+  count(met_sites) %>%
+  mutate(pct = round(100 * n / n_distinct(pt_data$study_id), 1))
+
+#diagnosis
+diagnosis_counts <- pt_data %>% count(diagnosis)
+
+#gleason: parse "3+4" -> total, take first value if multiple ("|"-separated)
+gleason_clean <- pt_data %>%
+  mutate(
+    gleason_score   = na_if(gleason_score, "NA"),
+    gleason_primary = str_extract(gleason_score, "^[^|]+"),
+    total           = map_dbl(str_split(gleason_primary, "\\+"), ~ sum(as.numeric(.x))),
+    gleason_group   = case_when(
+      is.na(total) ~ NA_character_,
+      total < 8    ~ "<8",
+      total >= 8   ~ "8-10"
+    )
+  )
+gleason_counts <- gleason_clean %>% count(gleason_group)
+
+#tx_context: strip "Post-ARPI"/"Post ARPI" prefix, then split into tokens 
+tx_long <- pt_data %>%
+  mutate(tx_context = str_remove(tx_context, "^Post[- ]ARPI-?")) %>%
+  separate_rows(tx_context, sep = "-") %>%
+  filter(tx_context != "")
+
+tx_long <- tx_long %>% filter(! (tx_context %in% c("Pre", "Post")) )
+# 
+# tx_counts <- tx_long%>%
+#   mutate(tx_class = case_when(
+#     grepl("axel", tx_context)       ~ "Taxane",
+#     grepl("ARPI|amide", tx_context) ~ "ARPI",
+#     grepl("Pluvicto", tx_context)   ~ "P-RPT",
+#     TRUE ~ NA_character_
+#   )) %>%
+#   filter(!is.na(tx_class)) %>%
+#   count(tx_class, sort = TRUE)
+
+tx_counts <- tx_long %>% 
+  group_by(study_id) %>% 
+  mutate(count = n()) %>% 
+  ungroup()
+#Count summary for treatment lines
+count_summary <- tx_counts %>% 
+  summarise(
+    min    = min(count),
+    q1     = quantile(count, 0.25),
+    median = median(count),
+    mean   = mean(count),
+    q3     = quantile(count, 0.75),
+    max    = max(count)
+  ) %>% 
+  pivot_longer(everything(), names_to = "stat", values_to = "n")
+
+#Pluvicto flag
+pluvicto_counts <- pt_data %>%
+  mutate(pluvicto_used = if_else(str_detect(tx_context, "Pluvicto"), "Yes", "No")) %>%
+  count(pluvicto_used)
+
+# ============ sample-level table (one row per study_id + tempus_date) ============
+#tumor purity
+purity_summary <- data %>%
+  mutate(tumor_purity = as.numeric(tumor_purity)) %>%
+  filter(!is.na(tumor_purity)) %>%
+  summarize(median = median(tumor_purity),
+            q1 = quantile(tumor_purity, .25),
+            q3 = quantile(tumor_purity, .75))
+
+#assay type / specimen source
+#assay_counts    <- data %>% count(assay_type)
+library(stringr)
+specimen_counts <- data %>% mutate(specimen = str_trim(specimen)) %>% count(specimen)
+
+# ============ print everything ============
+results <- list(
+  diagnosis  = diagnosis_counts,
+  met_sites  = met_counts,
+  gleason    = gleason_counts,
+  tx_tokens  = count_summary,
+  pluvicto   = pluvicto_counts,
+  purity     = purity_summary,
+  specimen   = specimen_counts
+)
+
+
+```
+
+
+```{r}
+
+gt_tables <- map(results, gt)
+library(tidyverse)
+library(gt)
+
+#Labels
+labels <- c(
+  diagnosis  = "Diagnosis, No. (%)",
+  met_sites  = "Metastatic sites, No. (%)",
+  gleason    = "Gleason, No. (%)",
+  pluvicto   = "P-RPT, No. (%)",
+  specimen   = "Specimen source, No. (%)"
+)
+
+format_section <- function(df, label) {
+  cat_col <- names(df)[1]   # first column = category
+  n_col   <- "n"
+  df %>%
+    mutate(pct = round(100 * .data[[n_col]] / sum(.data[[n_col]]), 1)) %>%
+    transmute(characteristic = paste0("  ", .data[[cat_col]]),
+              value = paste0(.data[[n_col]], " (", pct, ")")) %>%
+    add_row(characteristic = label, value = "", .before = 1)
+}
+
+#Counts for sections
+count_sections <- map2(results[names(labels)], labels, format_section) %>%
+  bind_rows()
+
+#Tumor purity row
+purity_row <- tibble(
+  characteristic = "Tumor purity, median (IQR)",
+  value = sprintf("%.0f (%.0f-%.0f)", results$purity$median, results$purity$q1, results$purity$q3)
+)
+#Number of treatment lines per pt including P-RPT
+tx_count <- tibble(
+  characteristic = "Treatment lines after ADT, median (IQR)",
+  value = sprintf("%d (%d-%d)", 
+                   as.integer(results$tx_tokens$n[3]), 
+                   as.integer(results$tx_tokens$n[2]), 
+                   as.integer(results$tx_tokens$n[5]))
+)
+
+table1 <- bind_rows(count_sections, tx_count, purity_row)
+
+table1 %>%
+  gt() %>%
+  cols_label(
+    characteristic = "Characteristic", 
+    value = "Value"
+  ) %>% tab_options(
+    table.font.size = px(12),               # Slightly smaller font if needed
+    data_row.padding = px(4)                # Tighter row padding
+  ) %>%
+   gtsave(filename = "/Users/debanjansaha/Desktop/pluvicto_plots_v2/demo_table.pdf", vheight = 900,                 
+     vwidth = 1100)
+```
+
+
+########################Onco plots######################################
+
+#SNV/Indel Oncoplot
+```{r}
+#SNV/Indel regex for Gene, Mutation,  VAF notation
+mutation_regex <- "[A-Z0-9]+\\s*(p\\.[A-Za-z0-9\\*]+|splice_region)"
+
+classify_mut <- function(hgvsp) {
+  if (str_detect(hgvsp, "splice_region")) {
+    return("Splice_Site")
+  } else if (str_detect(hgvsp, "\\*")) {
+    return("Nonsense_Mutation")
+  } else if (str_detect(hgvsp, "fs")) {
+    return("Frame_Shift_Del")
+  } else if (str_detect(hgvsp, "p\\.")) {
+    return("Missense_Mutation")
+  } else {
+    return("Other")  # catch-all instead of silently falling into Missense
+  }
+}
+
+#---------Data wrangling for SNV/Indels----------------
+
+#create list of mutations
+mut_list <- data %>% 
+  mutate(Tumor_Sample_Barcode = paste0(study_id, "_", tempus_date, "_", assay_type), mutations = paste0(mut_status, "|", vus), extracted = str_extract_all(mutations, mutation_regex))
+#Convert to df, drop empty entries 
+mut_df <- mut_list %>%
+  unnest(extracted) %>%       
+  dplyr::filter(!is.na(extracted))   
+#Separate gene from mutation in df
+mut_df <- mut_df %>%
+  mutate(
+    Hugo_Symbol = str_extract(extracted, "^[A-Z0-9]+"),
+    HGVSp_Short = str_extract(extracted, "p\\.[A-Za-z0-9\\*]+"),
+    Variant_Classification = sapply(extracted, classify_mut)
+  ) %>%
+  dplyr::select(study_id, Tumor_Sample_Barcode, extracted, Hugo_Symbol, HGVSp_Short, Variant_Classification)
+
+
+#Convert to MAF format with FS as FS-deletions (in truth can't distinguish if del from FS or not) or missense/nonsense as SNPs
+snv_maf <- mut_df %>%
+  mutate(
+    Variant_Type = case_when(
+      str_detect(HGVSp_Short, "fs") ~ "DEL",    #Classify FS as FS-Del
+      TRUE ~ "SNP"  #Classify missense/nonsense as SNP                            
+    )
+  ) %>%
+  transmute(
+    #Creating placeholders to use with MAF plotting function
+    Hugo_Symbol,
+    Chromosome = "Unknown",
+    Start_Position = 1,
+    End_Position = 1,
+    Reference_Allele = "N",
+    Tumor_Seq_Allele2 = "N",
+
+    #Required MAF fields
+    Variant_Classification,
+    Variant_Type,
+
+    #AA change
+    HGVSp_Short,
+
+    #Sample ID
+    Tumor_Sample_Barcode = Tumor_Sample_Barcode
+  )
+#Convert to MAF
+maf_obj <- snv_maf%>% read.maf()
+
+#Create clinical annotations per sample
+clinical_annot <- data %>%
+  mutate(
+    Tumor_Sample_Barcode = paste0(study_id, "_", tempus_date, "_", assay_type),
+    #Annot for biopsy type
+    Assay = case_when(
+      specimen == "Tissue" ~ "Tissue",
+      specimen == "Liquid Biopsy" ~ "Liquid",
+      TRUE ~ "Other"
+    ),
+    #Annot for pre/post Pluvicto
+    Pluvicto = case_when(
+      str_detect(tx_context, "Pre-Pluvicto") ~ "Pre-Pluvicto",
+      str_detect(tx_context, "Pluvicto") ~ "Post-Pluvicto",
+      TRUE ~ "None"
+    ),
+    #Annot for MSI status
+    MSI = case_when(
+      msi == "Stable" ~ "Stable",
+      msi == "High" ~ "High",
+      TRUE ~ "NA"
+    ), 
+    
+   PSMA_FDG_discordance = case_when(
+    str_detect(fdg_response, regex("discordance", ignore_case = TRUE)) ~ "Discordant",
+    str_detect(fdg_response, regex("concordance", ignore_case = TRUE)) ~ "Concordant",
+    is.na(fdg_response) ~ NA_character_
+  )
+    ) %>% 
+  dplyr::select(Tumor_Sample_Barcode, Assay, Pluvicto, MSI, PSMA_FDG_discordance) %>% unique()
+
+```
+
+
+
+#CNA Oncoplot
+```{r}
+#Regex for CN mutations, annotated as Gene, CN Gain or CN loss
+cna_regex <- "([A-Z0-9]+)\\s+(gain|loss|CN gain|copy number gain|amplification|amp|CN deletion|copy number loss|loss|del|copy_number_gain|copy_number_loss|CopyNumberLoss)"
+
+
+#----------Data wrangling for CN alterations--------------
+#Dataframe for CN Gains or Amps and CN Losses or Dels using regex
+cna_df <- data %>%
+  mutate(
+    Tumor_Sample_Barcode = paste0(study_id, "_", tempus_date, "_", assay_type),
+    cna_raw = str_extract_all(mut_status, cna_regex)
+  ) %>%
+  dplyr::select(Tumor_Sample_Barcode, cna_raw) %>%
+  unnest(cna_raw) %>%
+  dplyr::filter(!is.na(cna_raw)) %>%
+   mutate(
+    Hugo_Symbol = str_extract(cna_raw, "^[A-Z0-9]+"),
+    direction = str_extract(
+      cna_raw,
+      regex("gain|loss|amplification|deletion", ignore_case = TRUE)
+    ) %>% str_to_lower(),
+    Variant_Classification = case_when(
+      direction %in% c("gain", "amplification") ~ "Amplification",
+      direction %in% c("loss", "deletion")      ~ "Deletion",
+      TRUE ~ NA_character_
+    )
+  )
+
+#Convert to wide format with rows as samples and columns as presence/absence of CN alteration
+cna_wide <- cna_df %>%
+  dplyr::select(Tumor_Sample_Barcode, Hugo_Symbol, CNA = Variant_Classification) %>%
+  pivot_wider(
+    names_from = Hugo_Symbol,
+    values_from = CNA,
+    values_fill = "None",
+    values_fn = ~ paste(unique(.x), collapse = ";")
+  )
+#Merge CN dtaframe with prior clinical annotations 
+clinical_annot2 <- clinical_annot %>%
+  left_join(cna_wide, by = c("Tumor_Sample_Barcode" = "Tumor_Sample_Barcode"))
+```
+
+
+```{r}
+#Pull PSA value columns and pivot long
+psa_heat <- data %>%
+  dplyr::select(study_id, 
+                `Pre-C1` = psa_pre_c1_value,
+                `C1`     = psa_c1_value,
+                `C2`     = psa_c2_value,
+                `C3`     = psa_c3_value,
+                `C4`     = psa_c4_value,
+                `C5`     = psa_c5_value,
+                `C6`     = psa_c6_value) %>%
+  distinct(study_id, .keep_all = TRUE) %>%
+  mutate(across(-study_id, as.numeric)) %>%
+  #Absolute difference columns
+  mutate(across(c(`C1`, `C2`, `C3`, `C4`, `C5`, `C6`),
+                ~ . - `Pre-C1`,
+                .names = "diff_{.col}")) %>%
+  #Percent change columns
+  mutate(across(c(`C1`, `C2`, `C3`, `C4`, `C5`, `C6`),
+                ~ (. - `Pre-C1`) / `Pre-C1` * 100,
+                .names = "pct_{.col}")) %>%
+  mutate(`Pre-C1` = 0) %>%
+  dplyr::select(study_id, starts_with("diff_"), starts_with("pct_")) %>%
+  pivot_longer(
+    cols      = -study_id,
+    names_to  = c(".value", "Cycle"),
+    names_sep = "_"
+  ) %>%
+  mutate(Cycle = factor(Cycle, levels = c("Pre-C1","C1","C2","C3","C4","C5","C6"))) %>%
+  group_by(study_id) %>%
+  mutate(PSA50 = any(pct <= -50, na.rm = TRUE)) %>%
+  ungroup()
+
+
+
+```
+
+
+```{r}
+clinical_annot2 <- clinical_annot2 %>%
+  mutate(study_id = str_extract(Tumor_Sample_Barcode, "^WU-LU-\\d+")) %>%  left_join(distinct(dplyr::select(psa_heat, c(study_id, PSA50))), by = "study_id") %>% dplyr::select(-study_id)
+
+clinical_annot2 <- clinical_annot2 %>%
+  rename(P_RPT = Pluvicto) %>%
+  mutate(P_RPT = str_replace(P_RPT, "Pluvicto", "P-RPT"))  # keep hyphen only in the display VALUE, not the column name
+
+#Vector of annotation plots
+annot_vars <- c("Assay", "P_RPT", "MSI", "AR", "PTEN", "BRCA2", "PSA50", "PSMA_FDG_discordance")
+annot_colors <- list()
+
+#Set unique color per annotation plot, if none then Gray 
+for (v in annot_vars) {
+  cats <- unique(clinical_annot2[[v]])
+  pal  <- setNames(jco_cols[5:10], cats)
+  
+  if ("None"   %in% cats) pal["None"]   <- "gray85"
+ # if ("Stable" %in% cats) pal["Stable"] <- "gray85"
+  if ("FALSE"  %in% cats) pal["FALSE"]  <- "gray85"
+  if ("NA"       %in% cats) pal["NA"]       <- "gray85"  
+  
+  annot_colors[[v]] <- pal  
+}
+
+#---------Final plotting of Oncoplot-------------
+
+#Set colors for SNVs/Indels/CNA
+#pal <- viridis::viridis(n = 5, option = "D")
+variant_colors <- c(
+  Missense_Mutation = jco_cols[1],
+  Nonsense_Mutation = jco_cols[2],
+  Frame_Shift = jco_cols[3], 
+  Amp = jco_cols[4],
+  Del = jco_cols[5]
+)
+
+#Annot for TMB
+tmb <-  data %>%
+  mutate(
+    Tumor_Sample_Barcode = paste0(study_id, "_", tempus_date, "_", assay_type),
+    TMB = tmb) %>% dplyr::select(Tumor_Sample_Barcode, TMB) %>% unique()
+tmb$TMB <- tmb$TMB %>% as.numeric()
+
+
+
+#sample_order <- maf_obj@clinical.data$Tumor_Sample_Barcode 
+pdf("/Users/debanjansaha/Desktop/pluvicto_plots_v2/pluvicto_oncoplot.pdf", width = 10)
+oncoplot(
+    maf = maf_obj,
+    clinicalFeatures = c("Assay", "P_RPT", "MSI", "AR", "PTEN", "BRCA2", "PSA50", "PSMA_FDG_discordance"),
+    annotationDat = clinical_annot2,annotationColor = annot_colors,
+    colors = variant_colors, topBarData = tmb, titleText = "", legend_height = 5, anno_height = 5, legendFontSize = 1, annotationFontSize = 1
+)
+dev.off()
+```
+
+
+#VAF density plots of Pluvicto treated mCRPC
+```{r}
+library(ggExtra)
+#Regex to extract VAFs from SNV data (Pattern is Gene, Mutation, VAF)
+#vaf_regex <- "([A-Z0-9]+)\\s+(p\\.[A-Za-z0-9_*]+)\\s+([0-9]+\\.?[0-9]*)"
+vaf_regex <- "([A-Z0-9]+)\\s+(p\\.[A-Za-z0-9_*]+|splice_region|c\\.[A-Za-z0-9_>+\\-]+)?\\s*([0-9]+\\.?[0-9]*)%?"
+
+df <- data %>%
+  group_by(study_id) %>%
+  mutate(
+    Pluvicto = as.integer(
+      str_detect(tx_context,
+                 regex("pluvicto", ignore_case = TRUE))
+    )
+  ) %>% mutate( mutations = paste0(mut_status, "|", vus), extracted = str_extract_all(mutations, vaf_regex), purity = as.numeric(tumor_purity))  %>%  unnest(extracted) %>%
+  #Parse into gene/protein/vaf columns
+  mutate(
+    gene    = str_match(extracted, vaf_regex)[,2],
+    protein = str_match(extracted, vaf_regex)[,3],
+    vaf     = as.numeric(str_match(extracted, vaf_regex)[,4])
+  ) %>% dplyr::select(study_id, Pluvicto, tempus_date, assay_type, gene, protein, vaf, tumor_purity) %>% mutate(
+    sample_type = case_when(
+      str_detect(assay_type, "xF") ~ "Liquid",
+      str_detect(assay_type, "xT") ~ "Tissue",
+      TRUE ~ NA
+    ), mut_id = paste0(gene, "_", protein)) %>% 
+   dplyr::select(study_id, tempus_date, mut_id, sample_type, vaf)  %>% dplyr::filter(!is.na(sample_type)) %>%
+  pivot_wider(
+  id_cols = c(study_id,
+              tempus_date,
+              mut_id),
+  names_from = sample_type,
+  values_from = vaf,
+  values_fn  = \(x) x[[1]],          
+  values_fill = NA_real_   
+) %>%
+  dplyr::filter(!is.na(Liquid) & !is.na(Tissue))
+```
+
+
+```{r}
+
+#Build the per-mutation, per-sample dataframe 
+df_long <- data %>%
+  group_by(study_id) %>%
+  mutate(
+    Pluvicto = as.integer(str_detect(tx_context, regex("pluvicto", ignore_case = TRUE))),
+    mutations = paste0(mut_status, "|", vus),
+    extracted = str_extract_all(mutations, vaf_regex),
+    purity    = as.numeric(tumor_purity)
+  ) %>%
+  unnest(extracted) %>%
+  mutate(
+    gene    = str_match(extracted, vaf_regex)[, 2],
+    protein = str_match(extracted, vaf_regex)[, 3],
+    vaf     = as.numeric(str_match(extracted, vaf_regex)[, 4])
+  ) %>%
+  dplyr::select(study_id, tempus_date, assay_type, gene, protein, vaf) %>%
+  mutate(
+    sample_type = case_when(
+      str_detect(assay_type, "xF") ~ "Liquid",
+      str_detect(assay_type, "xT") ~ "Tissue",
+      TRUE ~ NA
+    ),
+    mut_id = paste0(gene, "_", protein)
+  ) %>%
+  dplyr::filter(!is.na(sample_type)) %>%
+  dplyr::select(study_id, tempus_date, mut_id, sample_type, vaf)
+
+#Split into liquid and tissue
+df_liquid <- df_long %>%
+  filter(sample_type == "Liquid") %>%
+  mutate(liquid_date = tempus_date, Liquid = vaf) %>%
+  dplyr::select(-sample_type)
+
+df_tissue <- df_long %>%
+  filter(sample_type == "Tissue") %>%
+  mutate(tissue_date = tempus_date, Tissue = vaf) %>%
+  dplyr::select(-sample_type)
+
+#Join on study_id + mut_id, then filter to pairs within 30 days
+df <- df_liquid %>%
+  inner_join(df_tissue, by = c("study_id", "mut_id")) %>% mutate(
+  liquid_date = mdy(liquid_date),   
+  tissue_date = mdy(tissue_date),
+  date_diff   = abs(liquid_date - tissue_date)
+) %>%
+  filter(date_diff <= 30)  %>%
+  dplyr::select(study_id, liquid_date, tissue_date, mut_id, Liquid, Tissue)
+
+```
+
+
+```{r}
+library(ggExtra)
+n_genes <- df %>% mutate(Gene =gsub("_p\\..*$", "", mut_id)) %>% n_distinct()
+
+p <- df %>% mutate(Gene =gsub("_p\\..*$", "", mut_id)) %>% ggplot( aes(x = Tissue, y = Liquid, color = Gene)) +
+  geom_point(size = 3) +
+  geom_abline(linetype = "dotted") +
+  scale_color_jco() +
+  theme_bw() +
+  scale_color_manual(values = colorRampPalette(pal_jco()(10))(n_genes)) +
+  xlim(0, 100) +
+  ylim(0, 100) +
+  labs(color = "Variant") + xlab("Tempus xT VAF") + ylab("Tempus xF VAF") + stat_cor(aes(group = 1), method = "spearman")
+  
+#pdf("/Users/debanjansaha/Desktop/pluvicto_plots_v2/pluvicto_vafplot.pdf", width = 10, height = 8)
+ggMarginal(p, type = "density", fill = "black", alpha = 0.5)
+#dev.off()
+
+#Find average TMB
+data$tmb %>% as.numeric %>% mean(na.rm = TRUE)
+#Find MSI status distribution
+data$msi %>% table() %>% prop.table()
+```
+
+########################Lollipop plots######################################
+
+#Lolipop plots of select genes
+```{r}
+#Genes of interest
+GOI <- c("AR", "TP53", "BRCA2", "PTEN", "ATM")
+lapply(X = GOI, FUN = function(goi) {
+  
+#Loop thru SNV and VAF data for each gene in the annot df, separate into samples without Pluvicto  
+tp53_obj_pre <- left_join(snv_maf, dplyr::select(clinical_annot2, Tumor_Sample_Barcode, P_RPT) )%>% dplyr::filter(Hugo_Symbol == goi)  %>% dplyr::filter(P_RPT == "None") %>% read.maf()
+
+#SNV and VAF data for samples with Pluvicto treatment  
+tp53_obj_post <- left_join(snv_maf, dplyr::select(clinical_annot2, Tumor_Sample_Barcode, P_RPT) )%>% dplyr::filter(Hugo_Symbol == goi)  %>% dplyr::filter(P_RPT != "None") %>% read.maf()
+
+#Color variants as missense, nonsense, frameshift
+lol_colors <- jco_cols[3:6]
+names(lol_colors) <- unique(snv_maf$Variant_Classification)
+
+#Plot lollipop plots to visulize exonic/intronic distribution of SNVs
+pdf(paste0("/Users/debanjansaha/Desktop/pluvicto_plots_v2/", goi, "_lolipop.pdf"))
+lollipopPlot2(m1 = tp53_obj_pre, m2 = tp53_obj_post , gene = goi, m1_name = "P-RPT Untreated", m2_name = "P-RPT Treated", colors = lol_colors, legendTxtSize = 2, labPosSize = 5, pointSize = 2 ) 
+dev.off()
+})
+
+
+
+
+```
+
+
+
+
+
+#Main idea: For patients with VAF data before and after Pluvicto, we Hcluster VAFs to identify clusters of VAFs implying clones
+#Cut Tree to threshold these clones at given height, followed by manual inspection of clones using Pidgeon Hole principle to 
+#Determine clonal ordering, namely VAF-parent >= Sum of all VAF-child recursed down the tree for each node. 
+#Important Caveats: Hierarchical clustering is not as rigourous as other clustering algorithms (Sciclone, Pyclone) for clonal reconstruction, We do not have Copy number data for all exonic reads/VAFs, we assume baseline ploidy of 2 and 100% tumor purity and thus, are assuming that VAF is linearly proportional to the CCF. These are assumptions that are not necessarily true of all samples and thus limits our ability to infer clonal relationships. In the absence of this higher resolution data, these plots are an attempt to approximate the potential phylogenomic ordering although represent only one solution of many possible. 
+########################Fish plots######################################
+
+#Fishplot for WU-LU-051
+```{r}
+#Create matrix of VAF for each mutation/gene combo per row, ensure that filtering on times of starting and ending pluvicto  
+mat <- data %>% dplyr::filter(study_id == "WU-LU-051") %>% mutate( mutations = paste0(mut_status, "|", vus), extracted = str_extract_all(mutations, vaf_regex))  %>%  unnest(extracted) %>%  mutate(
+    gene    = str_match(extracted, vaf_regex)[,2],
+    protein = str_match(extracted, vaf_regex)[,3],
+    vaf     = as.numeric(str_match(extracted, vaf_regex)[,4])) %>% mutate(protein =gsub(pattern = "VGS", replacement = "", x = protein) ) %>% mutate(mut_id = paste0(gene, "_", protein)) %>% dplyr::select(pluvicto_start, pluvicto_end, , tempus_date, assay_type, mut_id, vaf) %>% pivot_wider(names_from = mut_id, values_from = vaf)
+purity <- data %>% dplyr::filter(study_id == "WU-LU-051") %>% mutate( mutations = paste0(mut_status, "|", vus), extracted = str_extract_all(mutations, vaf_regex)) %>% dplyr::select(study_id, tempus_date, assay_type, tumor_purity)
+
+#Filter for xF (cfDNA) Tempus data and format dates to datetime
+vaf_mat <- mat %>% dplyr::filter(grepl(pattern = "xF|xT", x = assay_type)) %>% mutate(Date = as.Date(
+  tempus_date,
+  format = "%m/%d/%y")) %>% arrange(Date)%>% dplyr::select(-c(pluvicto_start, pluvicto_end, tempus_date, assay_type, Date))  %>%
+  mutate(across(where(is.numeric), ~replace_na(., 0))) %>% t()
+
+#distance on VAF profiles
+d <- dist(vaf_mat)
+
+# hierarchical clustering
+hc <- hclust(d, method = "average")
+
+plot(hc)
+#Cut tree by distance threshold, using manual inspection
+#Will remove BRCA1/JAK1 cluster as likely private germline mutations that don't change longitudinally as well as 3rd cfDNA sample due to low purity 
+groups <- cutree(hc, h = 20)
+
+```
+
+
+```{r}
+#Format colnames as timepoints
+cnames <-c( paste0("T", seq_len(ncol(vaf_mat))), "groups")
+#Appending Grouping to VAF data
+vaf_mat <- data.frame(vaf_mat, groups)
+#Reset colnames
+colnames(vaf_mat) <- cnames
+
+#Average mutations based on grouping from Hclustering
+vaf_mat <- vaf_mat %>% mutate(mutation = row.names(.)) %>% 
+ group_by(groups) %>%
+  summarize(
+    across(where(is.numeric), mean),
+    mutations = paste(mutation, collapse = "\n"),
+    .groups = "drop"
+  )  %>%
+  dplyr::select(-groups) %>%                 
+  column_to_rownames("mutations") %>% 
+  as.matrix()
+
+#Manual inspection of clone-averaged VAF df with timepoints
+data.frame(vaf_mat)
+vaf_mat <- vaf_mat[1:3, c(1,2,3,5)]
+
+#Scraped from EPIC Tempus reports, using median VAF * 2 as tumor purity for ctDNA and assuming those represent clonal mutations
+#T1: 0.4% (xF)
+#T2: 1.3% (xF)
+#T3: 60% (xT)
+#T4: <0.25% (xF) --> Remove due to low purity (LLOD)
+#T5: 80% (xT) 
+purity <- c(T1 = 0.4 * 2, T2 = 1.3 * 2, T3 = 60,  T4 = 80)
+mat_corrected <- sweep(vaf_mat, 2, purity/100, "/") + 0.1 #Add small VAF to allow plotting
+#Pin CCF > 100 as clonal
+mat_corrected <- pmin(mat_corrected, 100)
+
+mat_corrected
+
+
+```
+
+
+```{r}
+#Parent assignment based on pigeonhole principle
+parents <- c(0, 1, 1)
+timepoints <- 1:4
+
+
+#Format dates
+mat <-  mat %>% dplyr::filter(!(assay_type == "Tempus xF" & tempus_date == "5/1/24")) #Remove this data manually given low tumor purity
+
+tempus_dates <- mdy(mat %>% dplyr::filter(assay_type == "Tempus xF" | assay_type == "Tempus xT") %>% .$tempus_date) %>% sort()
+pluvicto_dates <- mdy(unique(c(mat$pluvicto_start, mat$pluvicto_end))) %>% sort()
+t0 <- min(tempus_dates)
+
+#Get time from initial timepoint
+tempus_time_numeric <- as.numeric(tempus_dates - t0)
+pluvicto_time_numeric <- as.numeric(pluvicto_dates - t0)
+
+#Grep CN data
+cn_df <- data %>%
+  dplyr::filter(study_id == "201169764" & assay_type == "Tempus xT") %>%
+  mutate(
+    Tempus_date = mdy(tempus_date)
+  ) %>%
+  dplyr::select(
+    study_id,
+    tempus_date,
+    mut_status
+  ) %>%
+  mutate(
+    cn_events = str_extract_all(
+      mut_status,
+      regex(
+         "(\\b[A-Z0-9]+\\b)\\s*(CN gain|copy number gain|amplification|amp|CN deletion|copy number loss|loss|del|copy_number_gain|copy_number_loss|CopyNumberLoss)",
+        ignore_case = TRUE
+      )
+    )
+  ) %>%
+  unnest(cn_events) %>%
+  mutate(
+    gene = str_extract(cn_events, "^[A-Z0-9]+"),
+    cn_type = case_when(
+      str_detect(cn_events, regex("gain|amp", ignore_case = TRUE)) ~ "gain",
+      str_detect(cn_events, regex("loss|del", ignore_case = TRUE)) ~ "loss"
+    )
+  )%>% 
+  mutate(
+    time_numeric = as.numeric(mdy(tempus_date) - t0)
+  )
+
+#Create annotations for lines of times and labels
+all_vlines <- c(
+  tempus_time_numeric,
+  pluvicto_time_numeric)
+
+all_vlabels <- c(
+  format(tempus_dates, "%b %Y"),
+  paste0("PRPT:", format(pluvicto_dates, "%b %Y")))
+
+#CN event label associated with tempus reports for GOIs
+cn_annotations <- cn_df %>% dplyr::filter(gene %in% c("TP53", "AR", "BRCA2", "ATM", "PTEN", "RB1")) %>% 
+  group_by(time_numeric) %>%
+  summarise(
+    x   = dplyr::first(time_numeric),
+    y   = 110,
+    lab = paste(
+      paste0(gene, " ", cn_type),
+      collapse = ":"
+    ),
+    col = c("black"),
+    .groups = "drop"
+  )
+
+#Plotting fishplots
+seaObject <- createSeaObject(round(mat_corrected, 2), parents, timepoints = tempus_time_numeric,
+                            timepointInterpolation = T, col = pal_jco(alpha = 0.5)(10)[c(1:3)], cloneLabels = row.names(vaf_mat))
+
+pdf("/Users/debanjansaha/Desktop/pluvicto_plots_v2/WU-LU-051_dolphinplot.pdf", width = 10)
+dolphinPlot(
+  seaObject,
+  vlines = all_vlines,
+  vlab   = all_vlabels,
+  vlabSize = 2.5, ,annotSize = 3,annotations = cn_annotations,
+  showLegend = TRUE,
+  markMeasuredTimepoints = tempus_time_numeric,
+  borderCol = "black",
+  shape = "spline",
+  pos = "center",
+  separateIndependentClones = TRUE, ylab = "Variant allele frequency", xlab = "Time"
+)
+dev.off()
+```
+
+#Fishplot for WU-LU-054
+```{r}
+#Extract SNVs/Indels for annotated mutations and vus
+mat <- data %>% dplyr::filter(study_id == "WU-LU-054") %>% mutate( mutations = paste0(mut_status, "|", vus), extracted = str_extract_all(mutations, vaf_regex))  %>%  unnest(extracted) %>%  mutate(
+    gene    = str_match(extracted, vaf_regex)[,2],
+    protein = str_match(extracted, vaf_regex)[,3],
+    vaf     = as.numeric(str_match(extracted, vaf_regex)[,4])) %>% mutate(protein =gsub(pattern = "VGS", replacement = "", x = protein) ) %>% mutate(mut_id = paste0(gene, "_", protein)) %>% dplyr::select(pluvicto_start, pluvicto_end, , tempus_date, assay_type, mut_id, vaf) %>% pivot_wider(names_from = mut_id, values_from = vaf)
+
+
+purity <- data %>% dplyr::filter(study_id == "WU-LU-054") %>% mutate( mutations = paste0(mut_status, "|", vus), extracted = str_extract_all(mutations, vaf_regex)) %>% dplyr::select(study_id, tempus_date, assay_type, tumor_purity)
+
+
+#Filter for Tempus reports and convert to datetimes
+vaf_mat <- mat %>% dplyr::filter(grepl(pattern = "xT", x = assay_type)) %>% mutate(Date = as.Date(
+  tempus_date,
+  format = "%m/%d/%y")) %>% arrange(Date)%>% dplyr::select(-c(pluvicto_start, pluvicto_end, tempus_date, assay_type, Date))  %>%
+  mutate(across(where(is.numeric), ~replace_na(., 0))) %>% t()
+
+#Distance of VAFs using H clustering
+d <- dist(vaf_mat)
+hc <- hclust(d, method = "average")
+
+#Manually inspect clustering to determine cutoff
+plot(hc)
+# cut tree by distance threshold
+groups <- cutree(hc, h = 10)  # tune h
+
+#Rename timepoints
+cnames <-c( paste0("T", seq_len(ncol(vaf_mat))), "groups")
+vaf_mat <- data.frame(vaf_mat, groups) 
+colnames(vaf_mat) <- cnames
+#Average clusters in same grouping based on clustering and concatenate labels to get clones
+#*We assume that VAF is proportional to CCF although no CN data to determine this**
+vaf_mat <- vaf_mat %>% mutate(mutation = row.names(.)) %>% 
+ group_by(groups) %>%
+  summarize(
+    across(where(is.numeric), mean),
+    mutations = paste(mutation, collapse = "\n"),
+    .groups = "drop"
+  )  %>%
+  dplyr::select(-groups) %>%                 # drop grouping column
+  column_to_rownames("mutations") %>% # set clone names
+  as.matrix()
+
+#Manually inspect VAF trajectories to determine parent child relationships, more than one solution may be possible
+data.frame(vaf_mat)
+purity <- c(T1 = 50, T2 = 80)
+mat_corrected <- sweep(vaf_mat, 2, purity/100, "/")
+
+mat_corrected
+
+```
+
+
+
+
+```{r}
+parents <- c(0, 1, 0, 1)
+timepoints <- c(1, 2)
+
+
+#Get tempus and pluvicto dates
+tempus_dates <- mdy(mat %>% dplyr::filter(assay_type == "Tempus xT") %>% .$tempus_date) %>% sort()
+pluvicto_dates <- mdy(unique(c(mat$pluvicto_start, mat$pluvicto_end))) %>% sort()
+t0 <- min(tempus_dates)
+
+tempus_time_numeric <- as.numeric(tempus_dates - t0)
+pluvicto_time_numeric <- as.numeric(pluvicto_dates - t0)
+
+#Grep CN data
+cn_df <- data %>%
+  dplyr::filter(study_id == "WU-LU-054" & assay_type == "Tempus xT") %>%
+  mutate(
+    Tempus_date = mdy(tempus_date)
+  ) %>%
+  dplyr::select(
+    study_id,
+    Tempus_date,
+    mut_status
+  ) %>%
+  mutate(
+    cn_events = str_extract_all(
+      mut_status,
+      regex(
+         "(\\b[A-Z0-9]+\\b)\\s*(CN gain|copy number gain|amplification|amp|CN deletion|copy number loss|loss|del|copy_number_gain|copy_number_loss|CopyNumberLoss)",
+        ignore_case = TRUE
+      )
+    )
+  ) %>%
+  unnest(cn_events) %>%
+  mutate(
+    gene = str_extract(cn_events, "^[A-Z0-9]+"),
+    cn_type = case_when(
+      str_detect(cn_events, regex("gain|amp", ignore_case = TRUE)) ~ "gain",
+      str_detect(cn_events, regex("loss|del", ignore_case = TRUE)) ~ "loss"
+    )
+  )%>% 
+  mutate(
+    time_numeric = as.numeric(Tempus_date - t0)
+  )
+
+#Create annotations for lines of times and labels
+all_vlines <- c(
+  tempus_time_numeric,
+  pluvicto_time_numeric)[c(1,3,4,2)]
+
+all_vlabels <- c(
+  format(tempus_dates, "%b %Y"),
+  paste0("PRPT\n", format(pluvicto_dates, "%b %Y")))[c(1, 3, 4, 2)]
+
+#CN event label associated with tempus reports for GOIs
+cn_annotations <- cn_df %>% dplyr::filter(gene %in% c("TP53", "AR", "BRCA2", "ATM", "PTEN", "RB1")) %>% 
+  group_by(time_numeric) %>%
+  summarise(
+    x   = dplyr::first(time_numeric),
+    y   = 110,
+    lab = paste(
+      paste0(gene, " ", cn_type),
+      collapse = ":"
+    ),
+    col = c("black"),
+    .groups = "drop"
+  )
+
+#Create Seaobject
+seaObject <- createSeaObject(round(mat_corrected, 0), parents, timepoints = tempus_time_numeric,
+                            timepointInterpolation = T, col = pal_jco(alpha = 0.5)(10)[1:4], cloneLabels = row.names(vaf_mat))
+
+pdf("/Users/debanjansaha/Desktop/pluvicto_plots_v2/WU-LU-054_dolphinplot.pdf", width = 10, height = 10)
+#Create dolphin plot
+dolphinPlot(
+  seaObject,
+  vlines = all_vlines,
+  vlab   = all_vlabels,
+  vlabSize = 4, annotations = cn_annotations,annotSize = 4,
+  showLegend = TRUE,
+  markMeasuredTimepoints = tempus_time_numeric,
+  borderCol = "black",shape = "spline",
+  pos = "center",
+  separateIndependentClones = TRUE, ylab = "Variant allele frequency", xlab = "Time"
+)
+dev.off()
+
+
+```
+
+
+#WU-LU-066
+```{r}
+#Extract SNVs/Indels for annotated mutations and vus
+mat <- data %>% dplyr::filter(study_id == "WU-LU-066") %>% mutate( mutations = paste0(mut_status, "|", vus), extracted = str_extract_all(mutations, vaf_regex))  %>%  unnest(extracted) %>%  mutate(
+    gene    = str_match(extracted, vaf_regex)[,2],
+    protein = str_match(extracted, vaf_regex)[,3],
+    vaf     = as.numeric(str_match(extracted, vaf_regex)[,4])) %>% mutate(protein =gsub(pattern = "VGS", replacement = "", x = protein) ) %>% mutate(mut_id = paste0(gene, "_", protein)) %>% dplyr::select(pluvicto_start, pluvicto_end, , tempus_date, assay_type, mut_id, vaf) %>% pivot_wider(names_from = mut_id, values_from = vaf)
+
+
+purity <- data %>% dplyr::filter(study_id == "WU-LU-066") %>% mutate( mutations = paste0(mut_status, "|", vus), extracted = str_extract_all(mutations, vaf_regex)) %>% dplyr::select(study_id, tempus_date, assay_type, tumor_purity)
+mat <- mat %>% filter(
+    (assay_type == "Tempus xF" & tempus_date == "6/18/25") |
+    (assay_type == "Tempus xT" & tempus_date == "1/4/23")
+  )
+
+#Filter for Tempus reports and convert to datetimes
+vaf_mat <- mat %>% filter(
+    (assay_type == "Tempus xF" & tempus_date == "6/18/25") |
+    (assay_type == "Tempus xT" & tempus_date == "1/4/23")
+  ) %>% mutate(Date = as.Date(
+  tempus_date,
+  format = "%m/%d/%y")) %>% arrange(Date)%>% dplyr::select(-c(pluvicto_start, pluvicto_end, tempus_date, assay_type, Date))  %>%
+  mutate(across(where(is.numeric), ~replace_na(., 0))) %>% t()
+
+#Distance of VAFs using H clustering
+d <- dist(vaf_mat)
+hc <- hclust(d, method = "average")
+
+#Manually inspect clustering to determine cutoff
+plot(hc)
+# cut tree by distance threshold
+groups <- cutree(hc, h = 20)  # tune h
+
+#Rename timepoints
+cnames <-c( paste0("T", seq_len(ncol(vaf_mat))), "groups")
+vaf_mat <- data.frame(vaf_mat, groups) 
+colnames(vaf_mat) <- cnames
+#Average clusters in same grouping based on clustering and concatenate labels to get clones
+#*We assume that VAF is proportional to CCF although no CN data to determine this**
+vaf_mat <- vaf_mat %>% mutate(mutation = row.names(.)) %>% 
+ group_by(groups) %>%
+  summarize(
+    across(where(is.numeric), mean),
+    mutations = paste(mutation, collapse = "\n"),
+    .groups = "drop"
+  )  %>%
+  dplyr::select(-groups) %>%                 # drop grouping column
+  column_to_rownames("mutations") %>% # set clone names
+  as.matrix()
+
+#Manually inspect VAF trajectories to determine parent child relationships, more than one solution may be possible
+data.frame(vaf_mat)
+
+#xT Purity from Tempus reports
+purity <- c(T1 = 60, T2 = 22.2)
+mat_corrected <- sweep(vaf_mat, 2, purity/100, "/")
+mat_corrected <- pmin(mat_corrected, 100)#Pin max at 100% CCF
+data.frame(mat_corrected)
+
+```
+
+
+```{r}
+parents <- c(0, 0, 2, 0)
+timepoints <- c(1, 2)
+
+
+#Get tempus and pluvicto dates
+tempus_dates <- mdy(mat$tempus_date) %>% sort()
+pluvicto_dates <- mdy(unique(c(mat$pluvicto_start, mat$pluvicto_end))) %>% sort()
+t0 <- min(tempus_dates)
+
+tempus_time_numeric <- as.numeric(tempus_dates - t0)
+pluvicto_time_numeric <- as.numeric(pluvicto_dates - t0)
+
+#Create annotations for lines of times and labels
+all_vlines <- c(
+  tempus_time_numeric,
+  pluvicto_time_numeric)
+
+all_vlabels <- c(
+  format(tempus_dates, "%b %Y"),
+  paste0("PRPT\n", format(pluvicto_dates, "%b %Y")))
+
+#Grep CN data
+cn_df <- data %>%
+  dplyr::filter(study_id == "WU-LU-066" & assay_type == "Tempus xT") %>%
+  mutate(
+    Tempus_date = mdy(tempus_date)
+  ) %>%
+  dplyr::select(
+    study_id,
+    Tempus_date,
+    mut_status
+  ) %>%
+  mutate(
+    cn_events = str_extract_all(
+      mut_status,
+      regex(
+         "(\\b[A-Z0-9]+\\b)\\s*(CN gain|copy number gain|amplification|amp|CN deletion|copy number loss|loss|del|copy_number_gain|copy_number_loss|CopyNumberLoss)",
+        ignore_case = TRUE
+      )
+    )
+  ) %>%
+  unnest(cn_events) %>%
+  mutate(
+    gene = str_extract(cn_events, "^[A-Z0-9]+"),
+    cn_type = case_when(
+      str_detect(cn_events, regex("gain|amp", ignore_case = TRUE)) ~ "gain",
+      str_detect(cn_events, regex("loss|del", ignore_case = TRUE)) ~ "loss"
+    )
+  )%>% 
+  mutate(
+    time_numeric = as.numeric(Tempus_date - t0)
+  )
+
+#CN event label associated with tempus reports for GOIs
+cn_annotations <- cn_df %>% dplyr::filter(gene %in% c("TP53", "AR", "BRCA2", "ATM", "PTEN", "RB1")) %>% 
+  group_by(time_numeric) %>%
+  summarise(
+    x   = dplyr::first(time_numeric),
+    y   = 110,
+    lab = paste(
+      paste0(gene, " ", cn_type),
+      collapse = ";"
+    ),
+    col = c("black"),
+    .groups = "drop"
+  )
+
+#Create Seaobject
+seaObject <- createSeaObject(round(vaf_mat, 2), parents, timepoints = tempus_time_numeric,
+                            timepointInterpolation = T, col = pal_jco(alpha = 0.5)(10)[1:4], cloneLabels = row.names(vaf_mat))
+
+pdf("/Users/debanjansaha/Desktop/pluvicto_plots_v2/WU-LU-066_dolphinplot.pdf", width = 10)
+#Create dolphin plot
+dolphinPlot(
+  seaObject,
+  vlines = all_vlines,
+  vlab   = all_vlabels,
+  vlabSize = 4,
+  showLegend = TRUE,
+  markMeasuredTimepoints = tempus_time_numeric,annotations = cn_annotations,annotSize = 4,
+  borderCol = "black",
+  shape = "spline",
+  pos = "center",
+  separateIndependentClones = TRUE, ylab = "Variant allele frequency", xlab = "Time"
+)
+dev.off()
+
+```
+
+#WU-LU-032
+```{r}
+#Extract SNVs/Indels for annotated mutations and vus
+mat <- data %>% dplyr::filter(study_id == "WU-LU-032") %>% mutate( mutations = paste0(mut_status, "|", vus), extracted = str_extract_all(mutations, vaf_regex))  %>%  unnest(extracted) %>%  mutate(
+    gene    = str_match(extracted, vaf_regex)[,2],
+    protein = str_match(extracted, vaf_regex)[,3],
+    vaf     = as.numeric(str_match(extracted, vaf_regex)[,4])) %>% mutate(protein =gsub(pattern = "VGS", replacement = "", x = protein) ) %>% mutate(mut_id = paste0(gene, "_", protein)) %>% dplyr::select(pluvicto_start, pluvicto_end, , tempus_date, assay_type, mut_id, vaf) %>% pivot_wider(names_from = mut_id, values_from = vaf)
+
+#Filter for Tempus reports and convert to datetimes
+vaf_mat <- mat %>% dplyr::filter(grepl(pattern = "xF|xT", x = assay_type)) %>% mutate(Date = as.Date(
+  tempus_date,
+  format = "%m/%d/%y")) %>% arrange(Date)%>% dplyr::select(-c(pluvicto_start, pluvicto_end, tempus_date, assay_type, Date))  %>%
+  mutate(across(where(is.numeric), ~replace_na(., 0))) %>% t()
+
+#Distance of VAFs using H clustering
+d <- dist(vaf_mat)
+hc <- hclust(d, method = "average")
+
+#Manually inspect clustering to determine cutoff
+plot(hc)
+# cut tree by distance threshold
+groups <- cutree(hc, h = 10)  # tune h
+
+#Rename timepoints
+cnames <-c( paste0("T", seq_len(ncol(vaf_mat))), "groups")
+vaf_mat <- data.frame(vaf_mat, groups) 
+colnames(vaf_mat) <- cnames
+#Average clusters in same grouping based on clustering and concatenate labels to get clones
+#*We assume that VAF is proportional to CCF although no CN data to determine this**
+vaf_mat <- vaf_mat %>% mutate(mutation = row.names(.)) %>% 
+ group_by(groups) %>%
+  summarize(
+    across(where(is.numeric), mean),
+    mutations = paste(mutation, collapse = "\n"),
+    .groups = "drop"
+  )  %>%
+  dplyr::select(-groups) %>%                 # drop grouping column
+  column_to_rownames("mutations") %>% # set clone names
+  as.matrix()
+
+#Manually inspect VAF trajectories to determine parent child relationships, more than one solution may be possible
+data.frame(vaf_mat)
+
+#Scraped from Tempus report in EPIC, if reported as median VAF in cfDNA, then Purity = 2 * VAF
+#T1: 90% (xT)
+#T2: 1.8% (xF)
+#T3: 10.6% (xF)
+purity <- c(T1 = 90, T2 = 2 * 1.8, T3 = 2 * 10.6)
+mat_corrected <- sweep(vaf_mat, 2, purity/100, "/")
+
+mat_corrected <- pmin(mat_corrected, 100)#Pin max to 100% CCF
+data.frame(mat_corrected)
+
+```
+
+
+```{r}
+parents <- c(0, 1, 1, 1)
+timepoints <- c(1, 2, 3)
+
+
+#Get tempus and pluvicto dates
+tempus_dates <- mdy(mat$tempus_date) %>% sort()
+pluvicto_dates <- mdy(unique(c(mat$pluvicto_start, mat$pluvicto_end))) %>% sort()
+t0 <- min(tempus_dates)
+
+tempus_time_numeric <- as.numeric(tempus_dates - t0)
+pluvicto_time_numeric <- as.numeric(pluvicto_dates - t0)
+
+#Create annotations for lines of times and labels
+all_vlines <- c(
+  tempus_time_numeric,
+  pluvicto_time_numeric)
+
+all_vlabels <- c(
+  format(tempus_dates, "%b %Y"),
+  paste0("PRPT\n", format(pluvicto_dates, "%b %Y")))
+
+#Grep CN data
+cn_df <- data %>%
+  dplyr::filter(study_id == "107457016" & assay_type == "Tempus xT") %>%
+  mutate(
+    Tempus_date = mdy(tempus_date)
+  ) %>%
+  dplyr::select(
+    study_id,
+    Tempus_date,
+    mut_status
+  ) %>%
+  mutate(
+    cn_events = str_extract_all(
+      mut_status,
+      regex(
+         "(\\b[A-Z0-9]+\\b)\\s*(CN gain|copy number gain|amplification|amp|CN deletion|copy number loss|loss|del|copy_number_gain|copy_number_loss|CopyNumberLoss)",
+        ignore_case = TRUE
+      )
+    )
+  ) %>%
+  unnest(cn_events) %>%
+  mutate(
+    gene = str_extract(cn_events, "^[A-Z0-9]+"),
+    cn_type = case_when(
+      str_detect(cn_events, regex("gain|amp", ignore_case = TRUE)) ~ "gain",
+      str_detect(cn_events, regex("loss|del", ignore_case = TRUE)) ~ "loss"
+    )
+  )%>% 
+  mutate(
+    time_numeric = as.numeric(Tempus_date - t0)
+  )
+
+#CN event label associated with tempus reports for GOIs
+cn_annotations <- cn_df %>% dplyr::filter(gene %in% c("TP53", "AR", "BRCA2", "ATM", "PTEN", "RB1")) %>% 
+  group_by(time_numeric) %>%
+  summarise(
+    x   = dplyr::first(time_numeric),
+    y   = 110,
+    lab = paste(
+      paste0(gene, " ", cn_type),
+      collapse = ":"
+    ),
+    col = c("black"),
+    .groups = "drop"
+  )
+
+#Create Seaobject
+seaObject <- createSeaObject(round(mat_corrected, 2), parents, timepoints = tempus_time_numeric,
+                            timepointInterpolation = T, col = pal_jco(alpha = 0.5)(10)[1:4], cloneLabels = row.names(vaf_mat))
+pdf("/Users/debanjansaha/Desktop/pluvicto_plots_v2/WU-LU-032_dolphinplot.pdf", width = 15, height = 12)
+#Create dolphin plot
+dolphinPlot(
+  seaObject,
+  vlines = all_vlines,
+  vlab   = all_vlabels,
+  vlabSize = 5,
+  showLegend = TRUE,
+  markMeasuredTimepoints = tempus_time_numeric,annotations = cn_annotations,annotSize = 10,
+  borderCol = "black",
+  shape = "spline",
+  pos = "center",
+  separateIndependentClones = TRUE, ylab = "Variant allele frequency", xlab = "Time"
+)
+dev.off()
+```
+
+
+########################KM plots######################################
+#OS analysis in Pluvicto treated patients regressed onto mutation status
+```{r}
+library(survival)
+
+
+#today <- Sys.Date()
+today <- as.Date("2026-5-1")
+#2026-5-1
+
+
+```
+
+
+```{r}
+# Reusable helper: does mut_status show a mutation (any type) OR the specified CNA direction for `gene`?
+gene_altered <- function(mut_status, gene, cna_keywords) {
+  pattern <- paste0(
+    "\\b", gene, "\\b\\s*(",
+      "p\\.[A-Za-z0-9_*]+",     # missense/nonsense/other HGVSp
+      "|splice_region",         # matches splice_region, splice_region_variant, etc.
+      "|fs\\b",
+    ")",
+    "|\\b", gene, "\\b.*(", cna_keywords, ")"
+  )
+  as.integer(coalesce(str_detect(mut_status, regex(pattern, ignore_case = TRUE)), FALSE))
+}
+
+cna_loss <- "CN loss|copy number loss|deletion|del|copy_number_loss|CopyNumberLoss"
+cna_gain <- "CN gain|copy number gain|amplification|amp|copy_number_gain"
+
+#Subset dataframe for patient's with AR, TP53, BRCA2, ATM, or PTEN mutations
+df <- data %>%
+  dplyr::filter(!is.na(pluvicto_start)) %>%
+  mutate(
+    pluvicto_start = mdy(pluvicto_start),
+    death_date     = mdy(death_date),
+    Tempus_date    = mdy(tempus_date),
+    status = if_else(!is.na(death_date), 1L, 0L),
+    followup_date = if_else(status == 1L, death_date, today),
+    os_time_days = as.numeric(followup_date - pluvicto_start),
+    os_time_months = os_time_days / 30,
+
+    AR_mut    = gene_altered(mut_status, "AR",    cna_gain),
+    TP53_mut  = gene_altered(mut_status, "TP53",  cna_loss),
+    BRCA2_mut = gene_altered(mut_status, "BRCA2", cna_loss),
+    ATM_mut   = gene_altered(mut_status, "ATM",   cna_loss),
+    PTEN_mut  = gene_altered(mut_status, "PTEN",  cna_loss)
+  )
+```
+
+
+```{r}
+#Filter for entries with Tempus reports prior to Pluvicto start and not induced by Pluvicto, dedup patient entries
+#Indicator variable if any mutation (annotated or VUS) at any VAF was detected in the dataframe 
+df_patient <- df %>%
+  dplyr::filter(Tempus_date <= pluvicto_start) %>%
+  group_by(study_id) %>%
+  summarise(
+    AR_mut = as.integer(any(AR_mut == 1, na.rm = TRUE)),
+    PTEN_mut = as.integer(any(PTEN_mut == 1, na.rm = TRUE)),
+    TP53_mut = as.integer(any(TP53_mut == 1, na.rm = TRUE)),
+    BRCA2_mut = as.integer(any(BRCA2_mut == 1, na.rm = TRUE)),
+    ATM_mut = as.integer(any(ATM_mut == 1, na.rm = TRUE)),
+
+    pluvicto_start = dplyr::first(pluvicto_start),
+    death_date = dplyr::first(death_date),
+    last_followup = dplyr::first(followup_date),
+    status = dplyr::first(status),
+    os_time_months = dplyr::first(os_time_months),
+
+    .groups = "drop"
+  )
+
+#Add PSA50 grouping variable 
+df_patient <- df_patient %>%
+  mutate(group = case_when(
+    study_id %in% psa50_pts    ~ "PSA50 Responders",
+    study_id %in% nonpsa50_pts ~ "Non-Responders",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(group))
+
+#View(df_patient)
+```
+
+
+```{r}
+
+#Set theme
+pub_theme <- theme_classic() +
+  theme(
+    axis.text       = element_text(color = "black", size = 11),
+    axis.title      = element_text(color = "black", size = 12),
+    plot.title      = element_text(hjust = 0.5, size = 13, face = "bold"),
+    legend.text     = element_text(position = "None"),
+    legend.title    =element_text(position = "None"), 
+    panel.border    = element_rect(color = "black", fill = NA)
+  )
+
+#Mutations vector
+mutations <- c("TP53_mut", "PTEN_mut", "AR_mut", "BRCA2_mut", "ATM_mut")
+mut_labels <- c("TP53", "PTEN", "AR", "BRCA2", "ATM")
+
+#Loop to create KM plots
+km_plots <- lapply(seq_along(mutations), function(i) {
+  mut   <- mutations[i]
+  label <- mut_labels[i]
+
+  #Temp Df to create 4 category groupings 
+  df_tmp <- df_patient %>%
+    mutate(strata = case_when(
+      .data[[mut]] == 0 & group == "Non-Responders"   ~ "WT | Non-Responder",
+      .data[[mut]] == 0 & group == "PSA50 Responders" ~ "WT | PSA50 Responder",
+      .data[[mut]] == 1 & group == "Non-Responders"   ~ "Altered | Non-Responder",
+      .data[[mut]] == 1 & group == "PSA50 Responders" ~ "Altered | PSA50 Responder"
+    ))
+
+  #Create Survfit object
+  fit <- survfit(Surv(os_time_months, status) ~ strata, data = df_tmp)
+
+  #Plotting all four curves
+  ggsurvplot(
+    fit,
+    data              = df_tmp,
+    conf.int          = FALSE,
+    pval              = TRUE,
+    pval.size         = 4,
+    risk.table        = TRUE,
+    risk.table.col    = "strata",
+    risk.table.height = 0.28,
+    fontsize          = 3.5,
+    title             = label,
+    xlab              = "Months since Pluvicto start",
+    ylab              = "OS (%)",
+    break.time.by     = 6,
+    fun               = function(x) x * 100,
+    palette           = pal_jco()(4),
+    censor.shape      = 124,
+    censor.size       = 4,
+    ggtheme           = pub_theme,
+    tables.theme      = theme_cleantable()
+  )
+})
+
+names(km_plots) <- mut_labels
+
+#Cox PH modeling for univariate analyses 
+coxph(Surv(os_time_months, status) ~ AR_mut + group + AR_mut*group, data = df_patient) %>% summary()
+coxph(Surv(os_time_months, status) ~ TP53_mut + group + TP53_mut*group, data = df_patient) %>% summary()
+coxph(Surv(os_time_months, status) ~ ATM_mut + group + ATM_mut*group, data = df_patient) %>% summary()
+coxph(Surv(os_time_months, status) ~ PTEN_mut + group + PTEN_mut*group, data = df_patient) %>% summary()
+coxph(Surv(os_time_months, status) ~ BRCA2_mut + group + BRCA2_mut*group, data = df_patient) %>% summary()
+
+
+#Median OS across all patients
+df_patient$os_time_months %>% summary()
+
+
+#Plotting
+km_plots_no_legend <- lapply(km_plots, function(p) {
+  p$plot <- p$plot + theme(legend.position = "none")
+  p
+})
+
+pdf("KM_plots_pluvicto_mut_psa50.pdf", width = 15, height = 10)
+arrange_ggsurvplots(
+  km_plots_no_legend, 
+  ncol = 3,
+  nrow = 2,
+  risk.table.height = 0.25
+)
+dev.off()
+
+```
+
+```{r}
+#Create COX PH model per mutation
+genes <- c("ATM_mut")
+
+fits <- lapply(genes, function(g) {
+  coxph(as.formula(paste("Surv(os_time_months, status) ~", g, "* group")), data = df_patient)
+})
+names(fits) <- genes
+
+#Getter for summary stats, HR, CI, P value
+forest_df <- lapply(names(fits), function(gene) {
+  s <- summary(fits[[gene]])
+
+  #Df of stats
+  coef_df <- as.data.frame(s$conf.int)
+  p_vals  <- s$coefficients[, "Pr(>|z|)"]
+  
+  data.frame(
+    gene  = gene,
+    term  = rownames(s$coefficients),
+    hr    = coef_df[, "exp(coef)"],
+    lower = coef_df[, "lower .95"],
+    upper = coef_df[, "upper .95"],
+    pval  = p_vals
+  )
+}) %>%
+  bind_rows() %>%
+  mutate(
+
+      #Str replace to clean vars    
+      clean_label = term %>%
+      str_replace_all(c("group" = "", "ATM_mut" = "ATM", "AR_mut" = "AR")),
+    sig_stars = case_when(
+      pval < 0.001 ~ "***",
+      pval < 0.01  ~ "**",
+      pval < 0.05  ~ "*",
+      TRUE         ~ ""
+    ),
+    display_name = paste0(gene, ": ", clean_label)
+  )
+
+#Plotting
+p2 <- forest_df %>%
+  mutate(
+    term_clean = term %>% 
+      str_replace_all("groupPSA50 Responders", "PSA50 Response") %>%
+      str_replace_all("ATM_mut", "Mutation Effect") %>%
+      str_replace_all("AR_mut", "Mutation Effect"),
+    term_clean = str_replace(term_clean, ":", " x "),
+    
+    stat_label = sprintf("HR: %.2f (p=%.3f)", hr, pval)
+  ) %>% 
+  ggplot(aes(x = hr, y = term_clean)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "grey50") +
+  geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.2, color = viridis(1, begin = 0.2)) +
+  geom_point(size = 3, color = viridis(1, begin = 0.1)) +
+  geom_text(aes(label = stat_label), 
+            hjust = -0.1,  
+            vjust = -1,    #
+            size = 3.5, 
+            color = "black") +
+  facet_wrap(~gene, ncol = 1, scales = "free_y") + 
+  scale_x_log10(expand = expansion(mult = c(0.1, 0.4))) + 
+  theme_bw(base_size = 20) +
+  theme(
+    strip.text = element_text(face = "bold", size = 12),
+    panel.spacing = unit(1.5, "lines")
+  ) +
+  labs(
+    title = "Cox PH model of OS\nwith ATM mutation and PSA50",
+    x = "Hazard Ratio (Log Scale)",
+    y = ""
+  )
+p2
+
+#ggsave(plot = p2, filename = "ATM_PSA50_forest.pdf", width = 10)
+
+
+```
+
+
+
+
+
+#PSA50 analysis with mutations.##################################### 
+```{r}
+#Pull PSA value columns and pivot long
+psa_heat <- data %>%
+  dplyr::select(study_id, 
+                `Pre-C1` = psa_pre_c1_value,
+                `C1`     = psa_c1_value,
+                `C2`     = psa_c2_value,
+                `C3`     = psa_c3_value,
+                `C4`     = psa_c4_value,
+                `C5`     = psa_c5_value,
+                `C6`     = psa_c6_value) %>%
+  distinct(study_id, .keep_all = TRUE) %>%
+  mutate(across(-study_id, as.numeric)) %>%
+  #Absolute difference columns
+  mutate(across(c(`C1`, `C2`, `C3`, `C4`, `C5`, `C6`),
+                ~ . - `Pre-C1`,
+                .names = "diff_{.col}")) %>%
+  #Percent change columns
+  mutate(across(c(`C1`, `C2`, `C3`, `C4`, `C5`, `C6`),
+                ~ (. - `Pre-C1`) / `Pre-C1` * 100,
+                .names = "pct_{.col}")) %>%
+  mutate(`Pre-C1` = 0) %>%
+  dplyr::select(study_id, starts_with("diff_"), starts_with("pct_")) %>%
+  pivot_longer(
+    cols      = -study_id,
+    names_to  = c(".value", "Cycle"),
+    names_sep = "_"
+  ) %>%
+  mutate(Cycle = factor(Cycle, levels = c("Pre-C1","C1","C2","C3","C4","C5","C6"))) %>%
+  group_by(study_id) %>%
+  mutate(PSA50 = any(pct <= -50, na.rm = TRUE)) %>%
+  ungroup()
+```
+
+#Filtering for PSA50 analysis (67 total patients with PCa and Tempus data --> 37 recieved Pluvicto --> 33 had > 1 PSA (i.e 4 pts never had follow-up after Pluvicto) --> 15 achieved PSA50 and 18 did not) 
+```{r}
+#Filtering for patient's who had recurrent PSA values (>1 PSA) 
+#psa_heat %>% filter(study_id %in% got_pluvicto$study_id) %>% .$study_id %>% unique()
+
+
+psa_data <- psa_heat %>% group_by(study_id) %>% filter(study_id %in% got_pluvicto$study_id) %>% 
+  filter(n() > 1 & any(!is.na(pct))) %>%
+  ungroup() %>% .$study_id %>% unique() %>% data.frame() %>% .$.
+psa_heat <-  psa_heat %>% filter(study_id %in% psa_data)
+#Filter for patients who had PSA response
+#Variable denoting pateint's who had PSA50 at any point in treatment cycle (i.e PSA decline of 50% from baseline pre cycle 1 PSA)
+psa50_pts <- psa_heat %>% filter(PSA50 == T) %>% .$study_id %>% unique() 
+nonpsa50_pts <- psa_heat %>% filter(PSA50 == F) %>% .$study_id %>% unique() 
+psa_heat %>% group_by(study_id) %>% unique()
+```
+
+#PSA kinetics plot for trajectory for 33 patients out of 37 
+```{r}
+#pdf("psa_plot.pdf", width = 10, height = 10)
+p1 <- psa_heat %>%
+  mutate(Cycle = factor(Cycle, levels = c("Pre-C1","C1","C2","C3","C4","C5","C6"))) %>%
+  ggplot(aes(x = Cycle, y = pct, color = PSA50, group = study_id)) +
+  geom_point(size = 2) +
+  geom_line() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  scale_color_jco( 
+                        name = "PSA50\nduring treatemnt", 
+                    
+                        labels = c("TRUE" = "Responders", "FALSE" = "Non-Responders")) +
+  theme_bw(base_size = 15) +
+  labs(x = "Cycle", y = "%PSA change from Pre-C1 (ng/mL)", title = "PSA Trajectory by Cycle for 33 patients with > 1 PSA") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ylim(-200, 900)
+#dev.off()
+
+#Dataframe from OS analysis of top 5 recurrently mutation genes (all SNVs/Indels/CNA; both annotated and VUS) and association with 
+#PSA50 during RPLT
+
+#Aggreate all mutations from OS analysis and group into responders/non-responders based on PSA 50
+df_long <- df %>%
+  dplyr::select(study_id, ends_with("_mut")) %>%
+  mutate(group = ifelse(study_id %in% psa50_pts, "Responders", "Non-Responders")) %>%
+  pivot_longer(
+    cols      = ends_with("_mut"),
+    names_to  = "mutation",
+    values_to = "has_mutation"
+  ) %>%
+  mutate(mutation = str_remove(mutation, "_mut"))
+
+#Fisher exact testing for enrichment, followed by FDR correction for MHT
+fisher_results <- df_long %>%
+  group_by(mutation) %>%
+  summarise(
+    p_adj = p.adjust(fisher.test(table(has_mutation, group))$p.value, method = "BH"),
+    sig   = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE          ~ "ns"
+    ),
+    .groups = "drop"
+  )
+
+#Summary statistics for count distribution of mutations
+df_summary <- df_long %>%
+  group_by(group, mutation) %>%
+  summarise(count = sum(has_mutation, na.rm = TRUE), .groups = "drop") %>%
+  left_join(fisher_results, by = "mutation") %>%
+  mutate(mutation = fct_reorder(mutation, p_adj))
+
+#Plotting
+label_positions <- df_summary %>%
+  group_by(mutation) %>%
+  summarise(y_pos = max(count) + 1, sig = first(sig), .groups = "drop")
+
+p2 <- ggplot(df_summary, aes(x = mutation, y = count, fill = group)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+  geom_text(
+    aes(label = count),
+    position = position_dodge(width = 0.7),
+    vjust = -0.4, size = 3.2
+  ) +
+  geom_text(
+    data = label_positions,
+    aes(x = mutation, y = y_pos, label = sig),
+    inherit.aes = FALSE, size = 5, fontface = "bold"
+  ) +
+  scale_fill_manual(values = c("Responders" =  jco_cols[5], "Non-Responders" =  jco_cols[6])) +
+  scale_y_continuous(
+    breaks = scales::pretty_breaks(),
+    expand = expansion(mult = c(0, 0.15))
+  ) +
+  labs(
+    title    = "Mutation Enrichment by PSA50 Response",
+    subtitle = "Ordered by FDR-adjusted p-value | * p<0.05  ** p<0.01  *** p<0.001",
+    x        = NULL, y = "Count (SNV/Indel/CNA)", fill = "Group"
+  ) +
+  theme_bw(base_size = 15) +
+  theme(
+    legend.position = "top",
+    axis.text.x     = element_text(angle = 45, hjust = 1, face = "bold")
+  )
+
+pdf(file = "/Users/debanjansaha/Desktop/pluvicto_plots_v2/psa50.pdf", width = 15)
+ggarrange(p1, p2, ncol = 2, nrow = 1, legend = T, common.legend = F)
+dev.off()
+```
+
+
+```{r}
+#Overall PSA50 rate
+psa_heat$PSA50 %>% table() %>% prop.table()
+
+df_long
+psa_heat %>% inner_join(dplyr::select(df, c(study_id, ends_with("_mut"), starts_with("os")))) %>% View()
+
+df_long %>%
+  group_by(study_id, group) %>%
+  summarise(has_mutation = max(has_mutation), .groups = "drop") %>%
+  group_by(study_id, group) %>%
+  summarise(has_mutation = max(has_mutation), .groups = "drop") %>%
+  count(group, has_mutation)
+
+
+15 + 22 = 37 - 3 = 34
+```
+
+#MSI/TMB/CH association with PSA50
+```{r}
+  
+msi <- df %>%
+  mutate(
+    CH_mut = if_else(
+      gene_altered(mut_status, "DNMT3A", cna_gain) == 1 |
+      gene_altered(mut_status, "TET2",   cna_gain) == 1 |
+      gene_altered(mut_status, "ASXL1",  cna_gain) == 1,
+      1L, 0L
+    ),
+    tmb = as.numeric(tmb),
+    MSI_high = if_else(str_detect(msi, regex("MSI-H|Instable|High", ignore_case = TRUE)), 1L, 0L),
+    TMB_high = if_else(tmb >= 10, 1L, 0L)
+  ) %>%
+  group_by(study_id) %>%
+  summarise(
+    CH_mut   = as.integer(any(CH_mut == 1, na.rm = TRUE)),
+    MSI_high = as.integer(any(MSI_high == 1, na.rm = TRUE)),
+    TMB_high = as.integer(any(TMB_high == 1, na.rm = TRUE))
+  ) %>% mutate(group = case_when(
+    study_id %in% psa50_pts    ~ "PSA50 Responders",
+    study_id %in% nonpsa50_pts ~ "Non-Responders",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(group))
+
+
+vars <- c("CH_mut", "MSI_high", "TMB_high")
+
+results <- map_dfr(vars, function(v) {
+  tbl <- table(msi[[v]], msi$group)
+  test <- fisher.test(tbl)
+  tibble(
+    variable = v,
+    p_value  = test$p.value,
+    odds_ratio = test$estimate
+  )
+})
+
+results
+
+```
+
+
+#PSMA discordance with mutation/PSA50 status########################
+```{r}
+df_long
+
+df$fdg_response 
+
+df %>%
+  dplyr::select(study_id, ends_with("_mut"), fdg_response) %>% filter(!is.na(fdg_response)) %>%
+  mutate(group = ifelse(study_id %in% psa50_pts, "Responders", "Non-Responders")) %>%
+  pivot_longer(
+    cols      = ends_with("_mut"),
+    names_to  = "mutation",
+    values_to = "has_mutation"
+  ) %>% summarise(
+    p_adj = p.adjust(fisher.test(table(group, fdg_response))$p.value, method = "BH"),
+    sig   = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE          ~ "ns"
+    ),
+    .groups = "drop"
+  )
+```
+
+
+```{r}
+res <- df %>% 
+  filter(!is.na(fdg_response) & grepl(pattern = "Discordance|Concordance", x = fdg_response)) %>%
+  mutate(group = ifelse(study_id %in% psa50_pts, "Responders", "Non-Responders")) %>%
+  mutate(fdg = ifelse(grepl(pattern = "Concordance", x = fdg_response), yes = "Concordance", no = "Discordance")) %>% 
+  count(group, fdg) %>%
+  group_by(group) %>%
+  mutate(pct = n / sum(n),
+         total = sum(n)) %>%
+  ungroup()
+
+
+df %>% 
+  filter(!is.na(fdg_response) & grepl(pattern = "Discordance|Concordance", x = fdg_response)) %>%
+  mutate(group = ifelse(study_id %in% psa50_pts, "Responders", "Non-Responders")) %>%
+  mutate(fdg = ifelse(grepl(pattern = "Concordance", x = fdg_response), yes = "Concordance", no = "Discordance")) %>% 
+  count(group, fdg)
+
+p_val <- fisher.test(table(df %>%
+  filter(!is.na(fdg_response)) %>%
+  mutate(group = ifelse(study_id %in% psa50_pts, "Responders", "Non-Responders")) %>%
+  pull(group),
+  df %>% filter(!is.na(fdg_response)) %>% pull(fdg_response)))$p.value
+
+sig <- case_when(p_val < .001 ~ "***", p_val < .01 ~ "**", p_val < .05 ~ "*", TRUE ~ "ns")
+
+ggplot(res, aes(x = group, y = pct, fill = fdg)) +
+  geom_col(width = 0.6, color = "white") +
+  geom_text(aes(label = paste0(round(pct*100), "%\n(", n, "/", total, ")")),
+            position = position_stack(vjust = 0.5), size = 3, color = "white") +
+  annotate("text", x = 1.5, y = 1.05, label = sig, fontface = "bold", size = 5) +
+  scale_fill_manual(values = pal_aaas()(5)) +  # adjust to # of fdg_response levels
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = NULL, y = NULL, fill = "FDG response") +
+  theme_minimal()
+```
+```{r}
+
+res <- df %>%
+  select(study_id, ends_with("_mut"), fdg_response) %>%  # drop this select line if not needed
+  filter(!is.na(fdg_response) & grepl("Discordance|Concordance", fdg_response)) %>%
+  mutate(group = ifelse(study_id %in% psa50_pts, "Responders", "Non-Responders"),
+         fdg   = ifelse(grepl("Concordance", fdg_response), "Concordance", "Discordance")) %>%
+  pivot_longer(ends_with("_mut"), names_to = "mutation", values_to = "has_mutation") %>%
+  filter(has_mutation == 1) %>%
+  count(mutation, group, fdg) %>%
+  group_by(mutation, group) %>%
+  mutate(pct = n / sum(n), total = sum(n)) %>%
+  ungroup()
+
+# fisher p-value per mutation
+sig_tab <- df %>%
+  filter(!is.na(fdg_response) & grepl("Discordance|Concordance", fdg_response)) %>%
+  mutate(group = ifelse(study_id %in% psa50_pts, "Responders", "Non-Responders"),
+         fdg   = ifelse(grepl("Concordance", fdg_response), "Concordance", "Discordance")) %>%
+  pivot_longer(ends_with("_mut"), names_to = "mutation", values_to = "has_mutation") %>%
+  filter(has_mutation == 1) %>%
+  group_by(mutation) %>%
+  filter(n_distinct(group) == 2, n_distinct(fdg) == 2) %>%   # fisher needs both levels present
+  summarise(p = fisher.test(table(group, fdg))$p.value, .groups = "drop") %>%
+  mutate(p_adj = p.adjust(p, method = "BH"),
+         sig = case_when(p_adj < .001 ~ "***", p_adj < .01 ~ "**", p_adj < .05 ~ "*", TRUE ~ "ns"))
+
+ggplot(res, aes(x = group, y = pct, fill = fdg)) +
+  geom_col(width = 0.6, color = "white") +
+  geom_text(aes(label = paste0(round(pct*100), "%\n(", n, "/", total, ")")),
+            position = position_stack(vjust = 0.5), size = 2.8, color = "white") +
+  geom_text(data = sig_tab, aes(x = 1.5, y = 1.05, label = sig),
+            inherit.aes = FALSE, fontface = "bold", size = 4) +
+  facet_wrap(~ mutation) 
+
+
+```
+
